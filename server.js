@@ -1,103 +1,194 @@
-const express = require('express');
-const cors = require('cors');
-const path = require('path');
-const { createClient } = require('@supabase/supabase-js');
-const { GoogleGenerativeAI } = require('@google/generative-ai');
+import express from "express";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { GoogleGenAI } from "@google/genai";
+import { createClient } from "@supabase/supabase-js";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
-app.use(cors());
-app.use(express.json());
-
-// Serve frontend from public directory
-app.use(express.static(path.join(__dirname, 'public')));
-
-// Environment variables
 const PORT = process.env.PORT || 3000;
+
+// --------------------------------------------------
+// Environment variables
+// --------------------------------------------------
+
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SECRET_KEY = process.env.SUPABASE_SECRET_KEY;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
-// Initialize Supabase Client
-const supabase = createClient(SUPABASE_URL, SUPABASE_SECRET_KEY);
+if (!SUPABASE_URL) {
+  throw new Error("Missing SUPABASE_URL environment variable");
+}
 
-// Initialize Gemini Client
-const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
+if (!SUPABASE_SECRET_KEY) {
+  throw new Error("Missing SUPABASE_SECRET_KEY environment variable");
+}
 
-// Health check endpoint
-app.get('/api/health', (req, res) => {
-  res.json({ status: 'online', service: 'Personal AI Assistant Backend' });
+if (!GEMINI_API_KEY) {
+  throw new Error("Missing GEMINI_API_KEY environment variable");
+}
+
+// --------------------------------------------------
+// Clients
+// --------------------------------------------------
+
+const supabase = createClient(
+  SUPABASE_URL,
+  SUPABASE_SECRET_KEY,
+  {
+    auth: {
+      autoRefreshToken: false,
+      persistSession: false,
+      detectSessionInUrl: false
+    }
+  }
+);
+
+const ai = new GoogleGenAI({
+  apiKey: GEMINI_API_KEY
 });
 
-// Chat Endpoint
-app.post('/api/chat', async (req, res) => {
+// --------------------------------------------------
+// Middleware
+// --------------------------------------------------
+
+app.use(express.json({ limit: "1mb" }));
+
+app.use(
+  express.static(path.join(__dirname, "public"))
+);
+
+// --------------------------------------------------
+// Health check
+// --------------------------------------------------
+
+app.get("/health", (req, res) => {
+  res.json({
+    status: "ok",
+    service: "personal-ai-assistant"
+  });
+});
+
+// --------------------------------------------------
+// Root route
+// --------------------------------------------------
+
+app.get("/", (req, res) => {
+  res.sendFile(
+    path.join(__dirname, "public", "index.html")
+  );
+});
+
+// --------------------------------------------------
+// Chat API
+// --------------------------------------------------
+
+app.post("/api/chat", async (req, res) => {
   try {
-    const { userId, conversationId, message } = req.body;
+    const { prompt, userId } = req.body;
 
-    if (!userId || !message) {
-      return res.status(400).json({ error: 'userId and message are required.' });
+    if (!prompt || typeof prompt !== "string") {
+      return res.status(400).json({
+        error: "Prompt is required"
+      });
     }
 
-    let activeConversationId = conversationId;
+    // ----------------------------------------------
+    // Ask Gemini
+    // ----------------------------------------------
 
-    // 1. Create a conversation if one was not provided
-    if (!activeConversationId) {
-      const { data: convData, error: convError } = await supabase
-        .from('conversations')
-        .insert([{ user_id: userId, title: message.substring(0, 30) }])
-        .select()
-        .single();
-
-      if (convError) throw convError;
-      activeConversationId = convData.id;
-    }
-
-    // 2. Insert User Message
-    const { error: userMsgError } = await supabase
-      .from('messages')
-      .insert([{
-        conversation_id: activeConversationId,
-        user_id: userId,
-        role: 'user',
-        content: message
-      }]);
-
-    if (userMsgError) throw userMsgError;
-
-    // 3. Query Gemini AI
-    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
-    const result = await model.generateContent(message);
-    const response = await result.response;
-    const assistantReply = response.text();
-
-    // 4. Insert Assistant Message
-    const { error: assistantMsgError } = await supabase
-      .from('messages')
-      .insert([{
-        conversation_id: activeConversationId,
-        user_id: userId,
-        role: 'assistant',
-        content: assistantReply
-      }]);
-
-    if (assistantMsgError) throw assistantMsgError;
-
-    return res.json({
-      conversationId: activeConversationId,
-      reply: assistantReply
+    const response = await ai.models.generateContent({
+      model: "gemini-3.8-flash",
+      contents: prompt
     });
 
-  } catch (err) {
-    console.error('Chat error:', err);
-    return res.status(500).json({ error: err.message || 'Internal server error' });
+    const answer =
+      response.text || "No response generated.";
+
+    // ----------------------------------------------
+    // Save conversation if userId is supplied
+    // ----------------------------------------------
+
+    if (userId) {
+      const { data: conversation, error: conversationError } =
+        await supabase
+          .from("conversations")
+          .insert({
+            user_id: userId,
+            title: prompt.substring(0, 80)
+          })
+          .select()
+          .single();
+
+      if (conversationError) {
+        console.error(
+          "Conversation save error:",
+          conversationError
+        );
+      } else if (conversation) {
+        const { error: messageError } =
+          await supabase
+            .from("messages")
+            .insert([
+              {
+                conversation_id: conversation.id,
+                role: "user",
+                content: prompt
+              },
+              {
+                conversation_id: conversation.id,
+                role: "assistant",
+                content: answer
+              }
+            ]);
+
+        if (messageError) {
+          console.error(
+            "Message save error:",
+            messageError
+          );
+        }
+      }
+    }
+
+    return res.json({
+      success: true,
+      response: answer
+    });
+
+  } catch (error) {
+    console.error("Chat API error:", error);
+
+    return res.status(500).json({
+      success: false,
+      error: "AI request failed",
+      details:
+        process.env.NODE_ENV === "production"
+          ? undefined
+          : error.message
+    });
   }
 });
 
-// Serve index.html for root path
-app.get('*', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+// --------------------------------------------------
+// 404
+// --------------------------------------------------
+
+app.use((req, res) => {
+  res.status(404).json({
+    error: "Route not found"
+  });
 });
 
-app.listen(PORT, () => {
-  console.log(`Server listening on port ${PORT}`);
+// --------------------------------------------------
+// Start server
+// --------------------------------------------------
+
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(
+    `Personal AI Assistant running on port ${PORT}`
+  );
 });
 
