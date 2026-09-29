@@ -2,13 +2,13 @@ const express = require('express');
 const cors = require('cors');
 const path = require('path');
 const { createClient } = require('@supabase/supabase-js');
-const { GoogleGenAI } = require('@google/genai');
+const { GoogleGenerativeAI } = require('@google/generative-ai');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Serve static frontend files from the "public" folder
+// Serve frontend from public directory
 app.use(express.static(path.join(__dirname, 'public')));
 
 // Environment variables
@@ -17,18 +17,18 @@ const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SECRET_KEY = process.env.SUPABASE_SECRET_KEY;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
-// Initialize Supabase Admin Client
+// Initialize Supabase Client
 const supabase = createClient(SUPABASE_URL, SUPABASE_SECRET_KEY);
 
 // Initialize Gemini Client
-const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
+const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
   res.json({ status: 'online', service: 'Personal AI Assistant Backend' });
 });
 
-// Chat Endpoint: Stores prompt, queries Gemini, stores response
+// Chat Endpoint
 app.post('/api/chat', async (req, res) => {
   try {
     const { userId, conversationId, message } = req.body;
@@ -51,7 +51,7 @@ app.post('/api/chat', async (req, res) => {
       activeConversationId = convData.id;
     }
 
-    // 2. Insert User Message into messages table
+    // 2. Insert User Message
     const { error: userMsgError } = await supabase
       .from('messages')
       .insert([{
@@ -63,15 +63,13 @@ app.post('/api/chat', async (req, res) => {
 
     if (userMsgError) throw userMsgError;
 
-    // 3. Query Gemini AI server-side
-    const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
-      contents: message,
-    });
+    // 3. Query Gemini AI
+    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+    const result = await model.generateContent(message);
+    const response = await result.response;
+    const assistantReply = response.text();
 
-    const assistantReply = response.text;
-
-    // 4. Insert Assistant Reply into messages table
+    // 4. Insert Assistant Message
     const { error: assistantMsgError } = await supabase
       .from('messages')
       .insert([{
@@ -83,7 +81,6 @@ app.post('/api/chat', async (req, res) => {
 
     if (assistantMsgError) throw assistantMsgError;
 
-    // 5. Return clean response to caller
     return res.json({
       conversationId: activeConversationId,
       reply: assistantReply
@@ -95,7 +92,7 @@ app.post('/api/chat', async (req, res) => {
   }
 });
 
-// Explicit fallback to serve index.html for root path
+// Serve index.html for root path
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
@@ -103,3 +100,4 @@ app.get('*', (req, res) => {
 app.listen(PORT, () => {
   console.log(`Server listening on port ${PORT}`);
 });
+
